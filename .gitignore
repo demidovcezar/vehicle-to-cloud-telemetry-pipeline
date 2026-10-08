@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.idea/
+.streamlit/
+data/raw/*.jsonl
+data/processed/*.parquet
+data/processed/*.db
