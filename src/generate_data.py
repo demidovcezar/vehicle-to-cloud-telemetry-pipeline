@@ -3,83 +3,105 @@ import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-# Setare căi absolute ancorate la rădăcina proiectului
 BASE_DIR = Path(__file__).resolve().parent.parent
 RAW_DATA_PATH = BASE_DIR / "data" / "raw" / "telemetry.jsonl"
 
-VEHICLES = [f"VEHICLE_{i:02d}" for i in range(1, 6)]  # VEHICLE_01 .. VEHICLE_05
-DTC_CODES = ["P0217", "P0117", "P0300", None]  # Coduri OBD-II reale vs starea normală (None)
+VEHICLES = [f"VEHICLE_{i:02d}" for i in range(1, 6)]
 
 
-def generate_telemetry_data(num_records_per_vehicle: int = 2000) -> None:
-    """Generează un set de date sintetice de telemetrie auto în format JSON Lines (JSONL)."""
-    # Asigură existența folderului data/raw/
+class VehicleState:
+
+    def __init__(self, vehicle_id: str):
+        self.vehicle_id = vehicle_id
+        self.speed = 0.0
+        self.coolant_temp = random.uniform(25.0, 35.0)
+        self.mode = "IDLE"
+        self.ticks_in_mode = 0
+
+    def update_physics(self) -> None:
+        if self.ticks_in_mode <= 0:
+            self.mode = random.choice(["ACCEL", "CRUISE", "DECEL", "IDLE"])
+            self.ticks_in_mode = random.randint(6, 24)
+
+        self.ticks_in_mode -= 1
+
+        if self.mode == "ACCEL":
+            self.speed = min(130.0, self.speed + random.uniform(2.0, 4.5))
+        elif self.mode == "DECEL":
+            self.speed = max(0.0, self.speed - random.uniform(3.0, 6.0))
+        elif self.mode == "CRUISE":
+            self.speed = max(40.0, min(125.0, self.speed + random.uniform(-1.5, 1.5)))
+        elif self.mode == "IDLE":
+            self.speed = max(0.0, self.speed - 3.0)
+
+        if self.speed > 0:
+            self.rpm = int(850 + (self.speed * 20) + random.uniform(-60, 60))
+        else:
+            self.rpm = random.randint(750, 820)
+
+        if self.speed > 0 and self.coolant_temp < 92.0:
+            self.coolant_temp += random.uniform(0.1, 0.3)
+        elif self.speed == 0 and self.coolant_temp > 82.0:
+            self.coolant_temp -= random.uniform(0.05, 0.15)
+
+        self.battery_voltage = random.uniform(13.8, 14.3) if self.rpm > 1000 else random.uniform(12.3, 12.6)
+
+
+def apply_sensor_anomalies(record: dict) -> dict:
+    if random.random() < 0.01:
+        record["speed_kmh"] = None
+    if random.random() < 0.01:
+        record["coolant_temp_c"] = None
+    if random.random() < 0.01:
+        record["battery_voltage"] = None
+
+    if random.random() < 0.01 and record["speed_kmh"] is not None:
+        record["speed_kmh"] = random.choice([-15.0, 240.0])
+    if random.random() < 0.01 and record["coolant_temp_c"] is not None:
+        record["coolant_temp_c"] = random.choice([-30.0, 150.0])
+
+    if random.random() < 0.015:
+        dtc = random.choice(["P0217", "P0117", "P0300"])
+        record["diagnostic_code"] = dtc
+        if dtc == "P0217" and record["coolant_temp_c"] is not None:
+            record["coolant_temp_c"] = round(random.uniform(107.0, 118.0), 1)
+
+    return record
+
+
+def generate_telemetry_data(records_per_vehicle: int = 2000) -> None:
     RAW_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     start_time = datetime.now(timezone.utc) - timedelta(days=1)
-    records_written = 0
+    total_written = 0
+
+    print(f"[generator] Generating telemetry data for {len(VEHICLES)} vehicles...")
 
     with open(RAW_DATA_PATH, "w", encoding="utf-8") as f:
-        for vehicle_id in VEHICLES:
+        for v_id in VEHICLES:
+            vehicle = VehicleState(v_id)
             current_time = start_time
-            # Stări inițiale pentru fizica motorului
-            coolant_temp = random.uniform(20.0, 40.0)
-            speed = 0.0
 
-            for i in range(num_records_per_vehicle):
-                current_time += timedelta(seconds=5)  # Eșantionare la fiecare 5 secunde
+            for step in range(records_per_vehicle):
+                current_time += timedelta(seconds=5)
+                vehicle.update_physics()
 
-                # 1. Simulare dinamică viteza și RPM
-                speed_change = random.uniform(-5.0, 5.0)
-                speed = max(0.0, min(160.0, speed + speed_change))
-                rpm = int(speed * 30 + random.uniform(800, 1200)) if speed > 0 else random.randint(750, 850)
-
-                # 2. Inerție termică (temperatura motorului crește în mers)
-                if speed > 0 and coolant_temp < 90.0:
-                    coolant_temp += random.uniform(0.1, 0.4)
-                elif speed == 0 and coolant_temp > 30.0:
-                    coolant_temp -= random.uniform(0.1, 0.2)
-
-                # 3. Tensiune baterie / alternator
-                battery_voltage = random.uniform(13.6, 14.4)
-
-                # --- Injectare anomali deliberate pentru testarea filtrelor ETL ---
-
-                # Zgomot de senzor / anomalii fizice (1% șansă)
-                if random.random() < 0.01:
-                    speed = random.choice([-10.0, 250.0])  # Viteze imposibile
-                if random.random() < 0.01:
-                    coolant_temp = random.choice([-50.0, 150.0])  # Temperaturi extreme
-                if random.random() < 0.01:
-                    battery_voltage = random.uniform(9.0, 11.5)  # Baterie descărcată
-
-                # Căderi de semnal hardware / dropout de senzor (1% șansă de valori None)
-                speed_val = None if random.random() < 0.01 else round(speed, 1)
-                temp_val = None if random.random() < 0.01 else round(coolant_temp, 1)
-                volt_val = None if random.random() < 0.01 else round(battery_voltage, 2)
-
-                # Coduri de eroare de diagnosticare OBD-II (1.5% șansă)
-                dtc_code = random.choice(DTC_CODES) if random.random() < 0.015 else None
-
-                # În caz de cod P0217, simulăm supraîncălzire reală
-                if dtc_code == "P0217" and temp_val is not None:
-                    temp_val = round(random.uniform(108.0, 120.0), 1)
-
-                record = {
-                    "event_id": f"{vehicle_id}_{i:05d}",
-                    "vehicle_id": vehicle_id,
+                telemetry_frame = {
+                    "event_id": f"{v_id}_{step:05d}",
+                    "vehicle_id": v_id,
                     "timestamp": current_time.isoformat(),
-                    "speed_kmh": speed_val,
-                    "engine_rpm": rpm,
-                    "coolant_temp_c": temp_val,
-                    "battery_voltage": volt_val,
-                    "diagnostic_code": dtc_code,
+                    "speed_kmh": round(vehicle.speed, 1),
+                    "engine_rpm": vehicle.rpm,
+                    "coolant_temp_c": round(vehicle.coolant_temp, 1),
+                    "battery_voltage": round(vehicle.battery_voltage, 2),
+                    "diagnostic_code": None,
                 }
 
-                f.write(json.dumps(record) + "\n")
-                records_written += 1
+                final_frame = apply_sensor_anomalies(telemetry_frame)
 
-    print(f"[generator] A generat {records_written} pachete de telemetrie în: {RAW_DATA_PATH}")
+                f.write(json.dumps(final_frame) + "\n")
+                total_written += 1
+
+    print(f"[generator] Done! Written {total_written} records to: {RAW_DATA_PATH}")
 
 
 if __name__ == "__main__":
